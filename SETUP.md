@@ -49,7 +49,7 @@
 
 設定完後，到 **Actions → Daily question generation → Run workflow**，手動產生第一份題組（約 2–5 分鐘）。之後每天台灣時間清晨 4 點左右自動執行。
 
-> 排程只會在 **default branch（通常是 main）** 上執行，請先把這個分支 merge 進 main。
+> 排程只會在 repo 的 **default branch** 上執行。如果之後新增 `main` 分支，記得到 Settings → General 把 default branch 改成 `main`，Vercel 也會以 default branch 作為正式版。
 
 ## 4. Vercel（手機網頁）
 
