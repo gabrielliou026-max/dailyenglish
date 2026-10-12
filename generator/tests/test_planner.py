@@ -64,3 +64,42 @@ def test_expected_correct():
     assert abs(expected_correct(800, 800) - 0.625) < 1e-9
     assert expected_correct(600, 900) > 0.95
     assert 0.25 < expected_correct(990, 500) < 0.27
+
+
+FULL_SKILLS = SKILLS + [
+    Skill("reading:text-completion", "reading", "tc"),
+    Skill("reading:sentence-insertion", "reading", "si"),
+    Skill("reading:multi-passage", "reading", "mp"),
+    Skill("reading:graphic", "reading", "gr"),
+    Skill("listening:question-response", "listening", "qr"),
+    Skill("listening:conversation", "listening", "conv"),
+    Skill("listening:talk", "listening", "talk"),
+    Skill("listening:inference", "listening", "inf"),
+]
+
+
+def test_v2_plan_shape():
+    formats = set()
+    for seed in range(80):
+        plan = build_plan(FULL_SKILLS, {}, 805, 900, 500, random.Random(seed), NOW)
+        assert [p.format for p in plan.listening] == ["question-response"] * 3 + \
+            ["conversation", "talk"]
+        assert sum(len(p.slots) for p in plan.listening) == 9
+        assert all(p.exam_style == "toeic" for p in plan.listening)
+        main, tc = plan.readings
+        formats.add(main.format)
+        assert tc.format == "text-completion"
+        assert [s.skill_tag for s in tc.slots] == ["reading:text-completion"] * 3 + \
+            ["reading:sentence-insertion"]
+        main_tags = [s.skill_tag for s in main.slots]
+        if main.format in ("double", "triple"):
+            assert main_tags.count("reading:multi-passage") == 2 and len(main_tags) == 5
+        elif main.format == "graphic":
+            assert main_tags.count("reading:graphic") == 2 and len(main_tags) == 4
+        else:
+            assert len(main_tags) == 4 and all(t.startswith("reading:r") for t in main_tags)
+        all_slots = [s for p in plan.listening for s in p.slots] + plan.usage + \
+            [s for r in plan.readings for s in r.slots]
+        assert [s.slot for s in all_slots] == list(range(len(all_slots)))
+        assert 26 <= len(all_slots) <= 28   # 加上最多 3 題複習約 30 分鐘
+    assert formats == {"single", "double", "triple", "graphic"}

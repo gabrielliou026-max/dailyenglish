@@ -11,11 +11,22 @@ export const supabase = createClient(url ?? 'http://localhost', key ?? 'missing'
 
 export type Section = 'listening' | 'usage' | 'reading'
 
+export interface ScriptLine {
+  speaker: string
+  gender: 'f' | 'm'
+  text: string
+}
+
 export interface Passage {
   id: string
   title: string | null
   body: string
   genre: string
+  // v2（0002 migration 之後才有）
+  kind?: 'reading' | 'listening'
+  format?: string | null
+  script?: ScriptLine[] | null
+  audio_id?: string | null
 }
 
 export interface Question {
@@ -91,4 +102,37 @@ export async function loadSkillLabels(): Promise<Record<string, string>> {
   const { data, error } = await supabase.from('skills').select('tag,label_zh')
   if (error) throw error
   return Object.fromEntries((data ?? []).map((s) => [s.tag, s.label_zh]))
+}
+
+export const FORMAT_LABEL: Record<string, string> = {
+  'question-response': '應答',
+  conversation: '對話',
+  talk: '獨白',
+  single: '單篇閱讀',
+  double: '雙篇閱讀',
+  triple: '三篇閱讀',
+  graphic: '表格與圖表',
+  'text-completion': '短文填空',
+}
+
+// 音檔：透過 get_audio() 取回 base64，轉成 blob URL；同一段只抓一次
+const audioCache = new Map<string, Promise<string>>()
+
+export function audioUrl(id: string): Promise<string> {
+  let p = audioCache.get(id)
+  if (!p) {
+    p = (async () => {
+      const { data, error } = await supabase.rpc('get_audio', { p_id: id })
+      if (error) throw error
+      const row = (data as { mime: string; data_b64: string }[] | null)?.[0]
+      if (!row) throw new Error('找不到音檔')
+      const bin = atob(row.data_b64)
+      const bytes = new Uint8Array(bin.length)
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+      return URL.createObjectURL(new Blob([bytes], { type: row.mime || 'audio/mpeg' }))
+    })()
+    p.catch(() => audioCache.delete(id))
+    audioCache.set(id, p)
+  }
+  return p
 }

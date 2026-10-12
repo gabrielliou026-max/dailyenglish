@@ -1,22 +1,38 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type { View } from '../App'
 import {
-  Attempt, SECTION_LABEL, SetItem, SubmitResult, supabase,
+  Attempt, FORMAT_LABEL, SECTION_LABEL, SetItem, SubmitResult, supabase,
 } from '../lib/supabase'
+import { ListeningPlayer, PassageBody, Transcript } from '../components/PassageView'
 
 const LETTERS = ['A', 'B', 'C', 'D']
 
-const ITEM_SELECT = `position,is_review,question:questions(
-  id,section,skill_tag,focus,difficulty,exam_style,stem,options,answer_index,
-  explanation_zh,distractor_notes_zh,status,passage:passages(id,title,body,genre))`
+const QUESTION_FIELDS = `id,section,skill_tag,focus,difficulty,exam_style,stem,options,answer_index,
+  explanation_zh,distractor_notes_zh,status`
+const ITEM_SELECT_V2 = `position,is_review,question:questions(${QUESTION_FIELDS},
+  passage:passages(id,title,body,genre,kind,format,script,audio_id))`
+// 資料庫還沒套用 0002 時，passages 沒有 v2 欄位，改用舊的查詢
+const ITEM_SELECT_V1 = `position,is_review,question:questions(${QUESTION_FIELDS},
+  passage:passages(id,title,body,genre))`
+
+async function loadItems(setId: string) {
+  const v2 = await supabase.from('daily_set_items').select(ITEM_SELECT_V2)
+    .eq('set_id', setId).order('position')
+  if (!v2.error) return v2
+  return supabase.from('daily_set_items').select(ITEM_SELECT_V1).eq('set_id', setId).order('position')
+}
+
+function isListening(item: SetItem) {
+  return item.question.section === 'listening' || item.question.passage?.kind === 'listening'
+}
 
 // 複習題重新排列選項，避免記住位置；以題目 id 當種子，重新整理頁面順序也不變
 function displayOrder(item: SetItem, setId: string): number[] {
-  const order = [0, 1, 2, 3]
+  const order = item.question.options.map((_, i) => i)
   if (!item.is_review) return order
   let h = 2166136261
   for (const c of setId + item.question.id) h = Math.imul(h ^ c.charCodeAt(0), 16777619)
-  for (let i = 3; i > 0; i--) {
+  for (let i = order.length - 1; i > 0; i--) {
     h = Math.imul(h ^ (h >>> 15), 2246822507) >>> 0
     const j = h % (i + 1)
     ;[order[i], order[j]] = [order[j], order[i]]
@@ -38,7 +54,7 @@ export default function Quiz({ setId, labels, go }: Props) {
 
   useEffect(() => {
     Promise.all([
-      supabase.from('daily_set_items').select(ITEM_SELECT).eq('set_id', setId).order('position'),
+      loadItems(setId),
       supabase.from('attempts').select('*').eq('set_id', setId),
     ]).then(([it, at]) => {
       if (it.error || at.error) {
@@ -60,10 +76,18 @@ export default function Quiz({ setId, labels, go }: Props) {
     return <Summary items={items} attempts={attempts} labels={labels} go={go} />
   }
 
+  // 同一段聽力的題目都做完後才顯示文字稿，避免提前看到後面題目的答案
+  const current = items[idx]
+  const pid = current.question.passage?.id
+  const siblings = pid ? items.filter((i) => i.question.passage?.id === pid) : [current]
+  const pendingSiblings = siblings.filter((i) => i.question.id !== current.question.id &&
+                                                  !attempts[i.question.id]).length
+
   return (
     <QuestionView
       key={items[idx].question.id}
       setId={setId}
+      othersPending={pendingSiblings}
       item={items[idx]}
       index={idx}
       total={items.length}
@@ -78,6 +102,7 @@ export default function Quiz({ setId, labels, go }: Props) {
 
 interface QVProps {
   setId: string
+  othersPending: number
   item: SetItem
   index: number
   total: number
@@ -88,8 +113,11 @@ interface QVProps {
   onExit: () => void
 }
 
-function QuestionView({ setId, item, index, total, label, prior, onAnswered, onNext, onExit }: QVProps) {
+function QuestionView({ setId, othersPending, item, index, total, label, prior, onAnswered, onNext,
+                        onExit }: QVProps) {
   const q = item.question
+  const listening = isListening(item)
+  const audioOnly = listening && q.passage?.format === 'question-response'
   const order = useMemo(() => displayOrder(item, setId), [item, setId])
   const started = useRef(Date.now())
   const [chosen, setChosen] = useState<number | null>(prior ? prior.chosen_index : null)
@@ -147,10 +175,29 @@ function QuestionView({ setId, item, index, total, label, prior, onAnswered, onN
       <div className="chips">
         <span className="chip">{item.is_review ? '錯題複習' : SECTION_LABEL[q.section]}</span>
         <span className="chip">{label}</span>
+        {q.passage?.format && FORMAT_LABEL[q.passage.format] && (
+          <span className="chip">{FORMAT_LABEL[q.passage.format]}</span>
+        )}
         <span className="chip muted">{q.exam_style === 'toeic' ? 'TOEIC' : 'FLPT'}</span>
       </div>
 
-      {q.passage && (
+      {q.passage && listening && (
+        <section className="card passage">
+          <ListeningPlayer setId={setId} passage={q.passage} unlimited={!!result || item.is_review} />
+          {!q.passage.audio_id && <Transcript passage={q.passage} />}
+          {q.passage.audio_id && result && othersPending === 0 && (
+            <>
+              {q.passage.title && <p className="muted small">{q.passage.title}</p>}
+              <Transcript passage={q.passage} />
+            </>
+          )}
+          {q.passage.audio_id && result && othersPending > 0 && (
+            <p className="muted small">這段還有 {othersPending} 題，全部作答後顯示文字稿。</p>
+          )}
+        </section>
+      )}
+
+      {q.passage && !listening && (
         <section className="card passage">
           <button className="link" onClick={() => setShowPassage(!showPassage)}>
             {showPassage ? '收合文章 ▲' : '展開文章 ▼'}
@@ -158,7 +205,7 @@ function QuestionView({ setId, item, index, total, label, prior, onAnswered, onN
           {showPassage && (
             <>
               {q.passage.title && <h2>{q.passage.title}</h2>}
-              {q.passage.body.split(/\n\s*\n/).map((p, i) => <p key={i}>{p}</p>)}
+              <PassageBody body={q.passage.body} />
             </>
           )}
         </section>
@@ -177,7 +224,9 @@ function QuestionView({ setId, item, index, total, label, prior, onAnswered, onN
           return (
             <button key={orig} className={cls} onClick={() => answer(orig)} disabled={!!result || busy}>
               <span className="letter">{LETTERS[pos]}</span>
-              <span>{q.options[orig]}</span>
+              <span className={audioOnly && !result ? 'muted' : undefined}>
+                {audioOnly && !result ? '（聽音檔作答）' : q.options[orig]}
+              </span>
             </button>
           )
         })}
@@ -281,7 +330,9 @@ function Summary({ items, attempts, labels, go }: {
             {wrong.map((i) => (
               <li key={i.question.id}>
                 <p className="small muted">{labels[i.question.skill_tag] ?? i.question.skill_tag}・{i.question.focus}</p>
-                <p>{i.question.stem}</p>
+                {isListening(i) && i.question.passage?.format === 'question-response'
+                  ? <p>{i.question.passage.body}</p>
+                  : <p>{i.question.stem}</p>}
                 <p className="ok small">正解：{i.question.options[i.question.answer_index]}</p>
               </li>
             ))}

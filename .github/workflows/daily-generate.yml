@@ -21,7 +21,7 @@ concurrency:
 jobs:
   generate:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     defaults:
       run:
         working-directory: generator
@@ -33,6 +33,21 @@ jobs:
           cache: pip
           cache-dependency-path: generator/requirements.txt
       - run: pip install -r requirements.txt
+      # 聽力語音模型（約 120 MB），快取起來不用每天下載
+      - name: Cache Kokoro model
+        id: kokoro-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/kokoro
+          key: kokoro-v1.0-int8
+      - name: Download Kokoro model
+        if: steps.kokoro-cache.outputs.cache-hit != 'true'
+        working-directory: .
+        run: |
+          mkdir -p ~/kokoro
+          base=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
+          curl -fsSL --retry 3 -o ~/kokoro/kokoro-v1.0.int8.onnx "$base/kokoro-v1.0.int8.onnx"
+          curl -fsSL --retry 3 -o ~/kokoro/voices-v1.0.bin "$base/voices-v1.0.bin"
       - name: Generate
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
@@ -42,6 +57,8 @@ jobs:
           INPUT_DATE: ${{ inputs.date }}
           INPUT_FORCE: ${{ inputs.force }}
         run: |
+          export KOKORO_MODEL="$HOME/kokoro/kokoro-v1.0.int8.onnx"
+          export KOKORO_VOICES="$HOME/kokoro/voices-v1.0.bin"
           args=()
           if [ -n "$INPUT_DATE" ]; then args+=(--date "$INPUT_DATE"); fi
           if [ "$INPUT_FORCE" = "true" ]; then args+=(--force); fi

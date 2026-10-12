@@ -61,6 +61,30 @@ def due_reviews(conn, user_id: UUID, on: date, limit: int) -> list[UUID]:
     return [r["question_id"] for r in rows]
 
 
+def has_v2(conn) -> bool:
+    """0002 migration（聽力、音檔、新閱讀題型）是否已套用。"""
+    row = conn.execute(
+        """select to_regclass('public.audio_clips') is not null
+                  and exists (select 1 from information_schema.columns
+                               where table_schema = 'public' and table_name = 'passages'
+                                 and column_name = 'audio_id') as ok""").fetchone()
+    return bool(row["ok"])
+
+
+def prune_audio(conn, user_id: UUID, keep_days: int = 60) -> int:
+    """刪掉舊音檔（仍在錯題複習中的保留），控制資料庫大小。"""
+    cur = conn.execute(
+        """delete from audio_clips c
+            where c.user_id = %s and c.created_at < now() - make_interval(days => %s)
+              and not exists (
+                select 1 from passages p
+                  join questions q on q.passage_id = p.id
+                  join review_queue r on r.question_id = q.id
+                 where p.audio_id = c.id)""",
+        (user_id, keep_days))
+    return cur.rowcount
+
+
 def existing_set(conn, user_id: UUID, on: date) -> dict | None:
     return conn.execute(
         """select s.id, (select count(*) from attempts a where a.set_id = s.id) as answered
@@ -99,23 +123,46 @@ def _insert_question(conn, user_id: UUID, on: date, it: Item, passage_id: UUID |
          Jsonb(it.distractor_notes_zh), model)).fetchone()["id"]
 
 
-def save_set(conn, user_id: UUID, on: date, usage: list[Item], passage: Passage | None,
-             reviews: list[UUID], model: str) -> UUID:
-    """順序：用法 → 閱讀 → 錯題複習。"""
+def _insert_passage(conn, user_id: UUID, p: Passage, v2: bool) -> UUID:
+    if not v2:
+        return conn.execute(
+            """insert into passages (user_id, exam_style, genre, title, body)
+               values (%s, %s, %s, %s, %s) returning id""",
+            (user_id, p.exam_style, p.genre, p.title, p.body)).fetchone()["id"]
+    audio_id = None
+    if p.audio:
+        audio_id = conn.execute(
+            """insert into audio_clips (user_id, mime, duration_ms, data)
+               values (%s, 'audio/mpeg', %s, %s) returning id""",
+            (user_id, p.duration_ms, p.audio)).fetchone()["id"]
+    return conn.execute(
+        """insert into passages (user_id, exam_style, genre, title, body, kind, format, script,
+                                 audio_id)
+           values (%s, %s, %s, %s, %s, %s, %s, %s, %s) returning id""",
+        (user_id, p.exam_style, p.genre, p.title, p.body, p.kind, p.format,
+         Jsonb(p.script) if p.script is not None else None, audio_id)).fetchone()["id"]
+
+
+def save_set(conn, user_id: UUID, on: date, usage: list[Item], passages: list[Passage],
+             reviews: list[UUID], model: str, listening: list[Passage] | None = None,
+             v2: bool = False) -> UUID:
+    """順序：聽力 → 用法 → 閱讀 → 錯題複習（與正式考試相同，先聽後讀）。"""
     set_id = conn.execute(
         "insert into daily_sets (user_id, set_date) values (%s, %s) returning id",
         (user_id, on)).fetchone()["id"]
     entries: list[tuple[UUID, bool]] = []
+
+    def add_passage(p: Passage) -> None:
+        pid = _insert_passage(conn, user_id, p, v2)
+        for it in p.items:
+            entries.append((_insert_question(conn, user_id, on, it, pid, model), False))
+
+    for p in listening or []:
+        add_passage(p)
     for it in usage:
         entries.append((_insert_question(conn, user_id, on, it, None, model), False))
-    if passage:
-        pid = conn.execute(
-            """insert into passages (user_id, exam_style, genre, title, body)
-               values (%s, %s, %s, %s, %s) returning id""",
-            (user_id, passage.exam_style, passage.genre, passage.title, passage.body)
-        ).fetchone()["id"]
-        for it in passage.items:
-            entries.append((_insert_question(conn, user_id, on, it, pid, model), False))
+    for p in passages:
+        add_passage(p)
     entries += [(qid, True) for qid in reviews]
     for pos, (qid, is_review) in enumerate(entries):
         conn.execute(

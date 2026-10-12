@@ -27,7 +27,8 @@ jobs:
       - name: Apply schema
         run: |
           psql -v ON_ERROR_STOP=1 "$TEST_DATABASE_URL" \
-            -f supabase/tests/local_auth_stub.sql -f supabase/migrations/0001_init.sql
+            -f supabase/tests/local_auth_stub.sql -f supabase/migrations/0001_init.sql \
+            -f supabase/migrations/0002_listening_reading_formats.sql
       - run: python -m pytest -q
         working-directory: generator
 

@@ -7,19 +7,39 @@ import random
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 
-# v1（尚無聽力）每日題量：約 15 分鐘
+# v2 每日題量：約 30 分鐘
+#   聽力 9（應答 3、對話 3、獨白 3）＋用法 10＋閱讀約 9（主文章 4–5、短文填空 4）＋錯題複習最多 3
 USAGE_COUNT = 10
-READING_QUESTIONS = 4
+READING_QUESTIONS = 4          # 單篇文章的題數
 REVIEW_MAX = 3
 MIN_GRAMMAR = 3
 MIN_VOCAB = 3
 MAX_PER_TAG = 2
+
+QR_COUNT = 3                   # 聽力應答題數
+LISTENING_SET_QUESTIONS = 3    # 對話、獨白各幾題
+TEXT_COMPLETION_BLANKS = 4     # 短文填空空格數
 
 TOEIC_SHARE = 0.6  # 其餘為 FLPT 風格
 CALIBRATION_ATTEMPTS = 30  # 作答數低於此值時，難度刻意分散以加速定位程度
 
 TOEIC_GENRES = ["email", "memo", "notice", "advertisement", "article", "letter"]
 FLPT_GENRES = ["news report", "feature article", "editorial", "academic passage", "public announcement"]
+
+# 文章與聽力情境的主題，每天隨機輪換，避免題材集中在同一領域
+TOPICS = [
+    "technology and cybersecurity", "health and medicine", "environment and energy",
+    "travel and transportation", "education and training", "marketing and sales",
+    "finance and economics", "human resources and workplace culture",
+    "logistics and supply chain", "food and hospitality", "arts and entertainment",
+    "sports and recreation", "urban planning and real estate", "science news",
+    "public policy and society", "customer service",
+]
+
+# 主文章的格式與權重（短文填空另外固定一組）
+MAIN_READING_FORMATS = [("single", 0.4), ("double", 0.25), ("triple", 0.15), ("graphic", 0.2)]
+SPECIAL_READING_TAGS = {"reading:text-completion", "reading:sentence-insertion",
+                        "reading:multi-passage", "reading:graphic"}
 
 
 @dataclass(frozen=True)
@@ -51,12 +71,30 @@ class ReadingPlan:
     genre: str
     target_level: int
     slots: list[Slot]
+    # single | double | triple | graphic | text-completion
+    format: str = "single"
+    topic: str = ""
+
+
+@dataclass(frozen=True)
+class ListeningPlan:
+    format: str          # question-response | conversation | talk
+    exam_style: str
+    target_level: int
+    slots: list[Slot]
+    topic: str = ""
 
 
 @dataclass
 class Plan:
+    listening: list[ListeningPlan] = field(default_factory=list)
     usage: list[Slot] = field(default_factory=list)
-    reading: ReadingPlan | None = None
+    readings: list[ReadingPlan] = field(default_factory=list)
+
+    @property
+    def reading(self) -> ReadingPlan | None:
+        """主文章（相容 v1）。"""
+        return self.readings[0] if self.readings else None
 
 
 def rating_of(tag: str, stats: dict[str, SkillStat], base_level: int) -> float:
@@ -124,6 +162,37 @@ def build_plan(skills: list[Skill], stats: dict[str, SkillStat], base_level: int
 
     plan = Plan()
     slot_no = 0
+    tags_all = {s.tag for s in skills}
+
+    def level_for(tags: list[str]) -> int:
+        mean = sum(rating_of(t, stats, base_level) for t in tags) / len(tags)
+        return clamp_level(mean + pick_offset(rng, calibrating))
+
+    def make_slots(tags: list[str], exam_style: str, level: int) -> list[Slot]:
+        nonlocal slot_no
+        out = []
+        for tag in tags:
+            out.append(Slot(slot_no, tag, by_tag[tag].label_zh, exam_style, level))
+            slot_no += 1
+        return out
+
+    # 聽力：應答 3 題（各自一段音檔）＋對話、獨白各一段 3 題。聽力一律多益風格。
+    if "listening:question-response" in tags_all:
+        for _ in range(QR_COUNT):
+            tags = ["listening:question-response"]
+            level = level_for(tags)
+            plan.listening.append(ListeningPlan("question-response", "toeic", level,
+                                                make_slots(tags, "toeic", level),
+                                                rng.choice(TOPICS)))
+    for fmt in ("conversation", "talk"):
+        main = f"listening:{fmt}"
+        if main not in tags_all:
+            continue
+        extra = "listening:inference" if "listening:inference" in tags_all else main
+        tags = [main] * (LISTENING_SET_QUESTIONS - 1) + [extra]
+        level = level_for(tags)
+        plan.listening.append(ListeningPlan(fmt, "toeic", level, make_slots(tags, "toeic", level),
+                                            rng.choice(TOPICS)))
 
     # 用法：先保底文法、字彙各幾題，其餘依權重抽
     grammar = [s.tag for s in skills if s.section == "usage" and s.tag.startswith("grammar:")]
@@ -152,20 +221,41 @@ def build_plan(skills: list[Skill], stats: dict[str, SkillStat], base_level: int
         plan.usage.append(Slot(slot_no, tag, by_tag[tag].label_zh, style(), level))
         slot_no += 1
 
-    # 閱讀：一篇文章，題目技能不重複
-    reading = [s.tag for s in skills if s.section == "reading"]
-    if reading:
-        k = min(READING_QUESTIONS, len(reading))
-        tags = weighted_sample(rng, reading, [w(t) for t in reading], k, 1)
+    # 閱讀主文章：單篇、雙篇、三篇或表格，題目技能不重複
+    classic = [s.tag for s in skills if s.section == "reading" and s.tag not in SPECIAL_READING_TAGS]
+    if classic:
+        formats = [(f, wt) for f, wt in MAIN_READING_FORMATS
+                   if f == "single"
+                   or (f in ("double", "triple") and "reading:multi-passage" in tags_all)
+                   or (f == "graphic" and "reading:graphic" in tags_all)]
+        fmt = rng.choices([f for f, _ in formats], weights=[wt for _, wt in formats])[0]
+        if fmt == "single":
+            special, n_classic = [], READING_QUESTIONS
+        elif fmt == "graphic":
+            special, n_classic = ["reading:graphic"] * 2, 2
+        else:
+            special, n_classic = ["reading:multi-passage"] * 2, 3
+        picked = weighted_sample(rng, classic, [w(t) for t in classic],
+                                 min(n_classic, len(classic)), 1)
+        tags = special + picked
+        exam_style = style() if fmt == "single" else "toeic"
+        genre = rng.choice(TOEIC_GENRES if exam_style == "toeic" else FLPT_GENRES)
+        level = level_for(tags)
+        plan.readings.append(ReadingPlan(exam_style, genre, level,
+                                         make_slots(tags, exam_style, level), fmt,
+                                         rng.choice(TOPICS)))
+
+    # 短文填空（多益 Part 6／FLPT 用法短文填空），最後一空考篇章結構
+    if "reading:text-completion" in tags_all:
+        last = ("reading:sentence-insertion" if "reading:sentence-insertion" in tags_all
+                else "reading:text-completion")
+        tags = ["reading:text-completion"] * (TEXT_COMPLETION_BLANKS - 1) + [last]
         exam_style = style()
         genre = rng.choice(TOEIC_GENRES if exam_style == "toeic" else FLPT_GENRES)
-        mean = sum(rating_of(t, stats, base_level) for t in tags) / len(tags)
-        level = clamp_level(mean + pick_offset(rng, calibrating))
-        slots = []
-        for tag in tags:
-            slots.append(Slot(slot_no, tag, by_tag[tag].label_zh, exam_style, level))
-            slot_no += 1
-        plan.reading = ReadingPlan(exam_style, genre, level, slots)
+        level = level_for(tags)
+        plan.readings.append(ReadingPlan(exam_style, genre, level,
+                                         make_slots(tags, exam_style, level), "text-completion",
+                                         rng.choice(TOPICS)))
 
     return plan
 

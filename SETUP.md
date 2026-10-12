@@ -12,6 +12,7 @@
    - Region 選 **Northeast Asia (Tokyo)** 或 **Southeast Asia (Singapore)**
    - **Database Password 記下來**，第 4 步會用到
 2. 左側 **SQL Editor** → New query → 把 `supabase/migrations/0001_init.sql` 整份貼上 → **Run**
+   - 接著再開一個 New query，把 `supabase/migrations/0002_listening_reading_formats.sql` 整份貼上 → **Run**（聽力與閱讀新題型）
 3. 建立你的登入帳號：
    - **Authentication → Users → Add user → Create new user**，填 email、密碼，勾選 **Auto Confirm User**
    - **Authentication → Sign In / Providers**，關閉 **Allow new users to sign up**（只有你能用）
@@ -76,6 +77,18 @@
 
 ---
 
+## 從 v1 升級到 v2（聽力、閱讀新題型）
+
+已經照上面架設過 v1 的話，只要做一步：
+
+1. Supabase → **SQL Editor** → New query → 把 `supabase/migrations/0002_listening_reading_formats.sql` 整份貼上 → **Run**
+
+這份 SQL 可以重複執行。不需要新增任何 Secret：Kokoro 語音模型由 GitHub Actions 自動下載並快取，音檔存在原本的資料庫。
+
+執行完之後，下一次出題（清晨自動，或到 Actions 手動 Run workflow）就會有聽力。還沒執行這份 SQL 之前，出題程式會自動維持 v1 題型，不會失敗。
+
+---
+
 ## 疑難排解
 
 | 狀況 | 檢查 |
@@ -85,6 +98,8 @@
 | Actions 顯示 401 / authentication_error | `ANTHROPIC_API_KEY` 是否正確、是否有儲值 |
 | 想重新產生今天的題目 | Run workflow 時勾選 force（已作答的題組不會被覆蓋） |
 | 某題答案有問題 | 作答後按「回報題目有問題」，該題不計入能力值，也不會進錯題複習 |
+| 今天沒有聽力題 | 是否已執行 `0002`；Actions 紀錄裡若有 `Kokoro model files not found`，表示模型下載失敗，重新 Run workflow 即可 |
+| 按播放沒有聲音 | iPhone 先關掉靜音鍵；確認是從主畫面 App 或 Safari 開啟、已登入 |
 
 **Supabase 免費方案** 閒置約一週會暫停專案，但每天的排程都會寫入資料，正常使用不會碰到。
 若 repo 是 **public**，GitHub 會在 60 天沒有任何 commit 後自動停用排程，需要到 Actions 頁面重新啟用。

@@ -115,3 +115,16 @@ button.wide { width: 100%; }
 .wronglist li { padding: 10px 0; border-top: 1px solid var(--border); }
 .wronglist p { margin: 2px 0; }
 .plain li { padding: 4px 0; }
+
+/* v2：聽力與閱讀新題型 */
+.player { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.player .primary { min-width: 110px; }
+.transcript { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 8px; }
+.transcript p { font-size: 0.95rem; margin: 6px 0; }
+.blank { font-size: 0.85em; padding: 0 5px; border-radius: 4px; background: var(--weak-bg); font-weight: 600; }
+.preline { white-space: pre-line; }
+.doctitle { font-size: 0.85rem; color: var(--muted); letter-spacing: 0.04em; margin: 14px 0 4px; }
+.tablewrap { overflow-x: auto; margin: 8px 0; }
+.datatable { border-collapse: collapse; font-size: 0.9rem; min-width: 100%; }
+.datatable th, .datatable td { text-align: left; padding: 5px 10px 5px 0; border-bottom: 1px solid var(--border); white-space: nowrap; }
+.datatable th { color: var(--muted); font-weight: 600; }

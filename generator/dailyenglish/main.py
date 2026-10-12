@@ -13,14 +13,16 @@ import sys
 from datetime import date
 
 from . import db
-from .items import LLM, Stats, generate_reading, generate_usage
-from .planner import REVIEW_MAX, build_plan, today_in
+from .items import (LLM, Passage, Stats, generate_listening_set, generate_question_response,
+                    generate_reading, generate_usage)
+from .planner import REVIEW_MAX, SPECIAL_READING_TAGS, build_plan, today_in
+from .tts import TTS, add_audio
 
 log = logging.getLogger("dailyenglish")
 
 
 def generate_for_user(conn, llm: LLM, model: str, user: dict, on: date | None, force: bool,
-                      rng: random.Random) -> str:
+                      rng: random.Random, tts: TTS | None = None) -> str:
     uid = user["user_id"]
     on = on or today_in(user["timezone"])
 
@@ -33,7 +35,15 @@ def generate_for_user(conn, llm: LLM, model: str, user: dict, on: date | None, f
         db.delete_set(conn, existing["id"])
         conn.commit()
 
+    v2 = db.has_v2(conn)
     skills = db.active_skills(conn)
+    if not v2:
+        # 還沒套用 0002：維持 v1 題型（用法＋單篇閱讀）
+        log.warning("migration 0002 not applied; generating v1 set (no listening)")
+        skills = [s for s in skills
+                  if s.section != "listening" and s.tag not in SPECIAL_READING_TAGS]
+    elif tts is None:
+        skills = [s for s in skills if s.section != "listening"]
     stats = db.skill_stats(conn, uid)
     plan = build_plan(skills, stats, user["base_level"], user["goal_level"],
                       db.total_attempts(conn, uid), rng)
@@ -44,14 +54,27 @@ def generate_for_user(conn, llm: LLM, model: str, user: dict, on: date | None, f
     conn.commit()
     counts = Stats()
     try:
+        listening = _listening(llm, plan, avoid, rng, counts, tts)
+        avoid = avoid + [it.focus for p in listening for it in p.items]
         usage = generate_usage(llm, plan.usage, avoid, rng, counts)
-        passage = None
-        if plan.reading:
-            passage = generate_reading(llm, plan.reading, avoid + [i.focus for i in usage],
-                                       rng, counts)
-        if not usage and not passage:
+        avoid = avoid + [i.focus for i in usage]
+        readings: list[Passage] = []
+        for rp in plan.readings:
+            try:
+                p = generate_reading(llm, rp, avoid, rng, counts)
+            except Exception:
+                # 一組閱讀失敗不影響整份題組
+                log.exception("reading (%s) failed", rp.format)
+                counts.rejected += len(rp.slots)
+                continue
+            if p:
+                readings.append(p)
+                avoid = avoid + [it.focus for it in p.items]
+        if not usage and not readings and not listening:
             raise RuntimeError("no item survived verification")
-        db.save_set(conn, uid, on, usage, passage, reviews, model)
+        db.save_set(conn, uid, on, usage, readings, reviews, model, listening=listening, v2=v2)
+        if v2:
+            db.prune_audio(conn, uid)
         db.finish_run(conn, run_id, "ok", *_tokens(llm), counts.accepted, counts.rejected)
         conn.commit()
     except Exception as e:
@@ -60,9 +83,40 @@ def generate_for_user(conn, llm: LLM, model: str, user: dict, on: date | None, f
                       repr(e))
         conn.commit()
         raise
-    n_reading = len(passage.items) if passage else 0
-    return (f"{on}: {len(usage)} usage + {n_reading} reading + {len(reviews)} review "
-            f"(rejected {counts.rejected})")
+    n_listening = sum(len(p.items) for p in listening)
+    n_reading = sum(len(p.items) for p in readings)
+    return (f"{on}: {n_listening} listening + {len(usage)} usage + {n_reading} reading + "
+            f"{len(reviews)} review (rejected {counts.rejected})")
+
+
+def _listening(llm: LLM, plan, avoid: list[str], rng: random.Random, counts: Stats,
+               tts: TTS | None) -> list[Passage]:
+    """聽力出題＋產生音檔。任何一段失敗都只捨棄那一段。"""
+    if tts is None or not plan.listening:
+        return []
+    out: list[Passage] = []
+    qr = [p for p in plan.listening if p.format == "question-response"]
+    if qr:
+        try:
+            out += generate_question_response(llm, qr, avoid, rng, counts)
+        except Exception:
+            log.exception("question-response failed")
+            counts.rejected += len(qr)
+    for lp in plan.listening:
+        if lp.format == "question-response":
+            continue
+        try:
+            p = generate_listening_set(llm, lp, avoid, rng, counts)
+        except Exception:
+            log.exception("listening %s failed", lp.format)
+            counts.rejected += len(lp.slots)
+            continue
+        if p:
+            out.append(p)
+    voiced = add_audio(tts, out, rng)
+    counts.rejected += sum(len(p.items) for p in out if p not in voiced)
+    counts.accepted -= sum(len(p.items) for p in out if p not in voiced)
+    return voiced
 
 
 def _tokens(llm: LLM) -> tuple[int, int]:
@@ -78,14 +132,16 @@ def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 
     from .llm import ClaudeLLM
+    from .tts import KokoroTTS
     llm = ClaudeLLM()
+    tts = KokoroTTS.from_env()
     rng = random.Random(args.seed)
     failed = False
     with db.connect() as conn:
         for user in db.users(conn):
             try:
                 log.info("%s", generate_for_user(conn, llm, llm.model, user, args.date,
-                                                 args.force, rng))
+                                                 args.force, rng, tts))
             except Exception:
                 log.exception("generation failed for user %s", user["user_id"])
                 failed = True
